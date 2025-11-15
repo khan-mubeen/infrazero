@@ -14,7 +14,7 @@ import httpx
 from region_registry import RegionRegistry, Region
 
 app = FastAPI()
-MODE = os.getenv("INFRAZERO_MODE", "fake")
+MODE = os.getenv("INFRAZERO_MODE", "mock")
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,7 +69,7 @@ async def health():
 
 @app.post("/deploy/global")
 async def deploy_global(req: DeployRequest):
-    if MODE == "fake":
+    if MODE == "mock":
         return {
             "deployment_id": "demo-deployment",
             "regions": [r.model_dump() for r in registry.list_regions()],
@@ -135,9 +135,9 @@ async def infer(req: InferRequest):
 
 @app.post("/kill/{region_id}")
 async def kill_region(region_id: str):
-    if MODE == "fake":
+    if MODE == "mock":
         registry.update_region(region_id, status="down", latency_ms=None, disabled=True)
-        return {"region_id": region_id, "status": "down (fake)"}
+        return {"region_id": region_id, "status": "down (mock)"}
     else:
         await delete_instance(region_id)
         registry.update_region(region_id, status="down", latency_ms=None, disabled=True)
