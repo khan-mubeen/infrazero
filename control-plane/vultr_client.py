@@ -1,7 +1,7 @@
 import os
 import httpx
 from typing import Dict, Any
-from .bootstrap import build_user_data
+from bootstrap import build_user_data
 
 VULTR_API_BASE = "https://api.vultr.com/v2"
 VULTR_API_KEY = os.getenv("VULTR_API_KEY", "")
