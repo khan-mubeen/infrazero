@@ -15,6 +15,7 @@ export default function Home() {
   const [regions, setRegions] = useState<Region[]>([]);
   const [loading, setLoading] = useState(false);
   const [prompt, setPrompt] = useState("");
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [lastResult, setLastResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -24,7 +25,6 @@ export default function Home() {
       const data = await fetchRegions();
       setRegions(data.regions || []);
     } catch (e) {
-      // if control-plane is down we just keep current list
       console.error("Failed to load regions", e);
     }
   }
@@ -58,7 +58,7 @@ export default function Home() {
       const res = await infer(prompt);
 
       if (res.error) {
-        setError(res.error || "No healthy regions available.");
+        setError(res.error || "no healthy regions");
       } else {
         setLastResult(res);
       }
@@ -99,39 +99,48 @@ export default function Home() {
         </header>
 
         <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {regions.map((r) => (
-            <div
-              key={r.id}
-              className="rounded-xl border border-slate-800 p-4 flex flex-col gap-2"
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-sm text-slate-400">
-                    {r.slug.toUpperCase()}
-                  </div>
-                  <div className="font-semibold">{r.display_name}</div>
-                </div>
-                <span
-                  className={`px-2 py-1 text-xs rounded-full ${statusColor(
-                    r.status
-                  )}`}
-                >
-                  {r.status}
-                </span>
-              </div>
-              <div className="text-sm text-slate-300">
-                Latency:{" "}
-                {r.latency_ms != null ? `${Math.round(r.latency_ms)} ms` : "—"}
-              </div>
-              <button
-                onClick={() => handleKill(r.id)}
-                className="mt-auto text-xs px-3 py-1 rounded-md border border-red-500 text-red-400 hover:bg-red-500 hover:text-white disabled:opacity-60"
-                disabled={r.status === "down"}
+          {regions.map((r) => {
+            const isDown = r.status === "down";
+
+            return (
+              <div
+                key={r.id}
+                className="rounded-xl border border-slate-800 p-4 flex flex-col gap-2"
               >
-                Kill region
-              </button>
-            </div>
-          ))}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm text-slate-400">
+                      {r.slug.toUpperCase()}
+                    </div>
+                    <div className="font-semibold">{r.display_name}</div>
+                  </div>
+                  <span
+                    className={`px-2 py-1 text-xs rounded-full ${statusColor(
+                      r.status
+                    )}`}
+                  >
+                    {r.status}
+                  </span>
+                </div>
+                <div className="text-sm text-slate-300">
+                  Latency:{" "}
+                  {r.latency_ms != null ? `${Math.round(r.latency_ms)} ms` : "—"}
+                </div>
+                <button
+                  onClick={() => handleKill(r.id)}
+                  disabled={isDown}
+                  className={`mt-auto text-xs px-3 py-1 rounded-md border
+                    ${
+                      isDown
+                        ? "border-slate-700 text-slate-500 bg-transparent cursor-not-allowed"
+                        : "border-red-500 text-red-400 hover:bg-red-500 hover:text-white"
+                    }`}
+                >
+                  {isDown ? "Killed" : "Kill region"}
+                </button>
+              </div>
+            );
+          })}
         </section>
 
         <section className="grid grid-cols-1 md:grid-cols-2 gap-6">

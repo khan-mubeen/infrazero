@@ -2,16 +2,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
-from vultr_client import create_instance, delete_instance, REGION_NAMES
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from datetime import datetime
 import asyncio
 import time
-import httpx
+from datetime import datetime
+from typing import Optional
 
+import httpx
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from vultr_client import create_instance, delete_instance, REGION_NAMES
 from region_registry import RegionRegistry, Region
+
 
 app = FastAPI()
 MODE = os.getenv("INFRAZERO_MODE", "mock")
@@ -26,50 +30,80 @@ app.add_middleware(
 
 registry = RegionRegistry()
 
+
+def seed_mock_regions():
+    regions = [
+        Region(
+            id="ewr",
+            slug="ewr",
+            display_name="US-East (EWR)",
+            ip="localhost:8001",
+            status="healthy",
+            disabled=False,
+        ),
+        Region(
+            id="ams",
+            slug="ams",
+            display_name="EU (Amsterdam)",
+            ip="localhost:8002",
+            status="healthy",
+            disabled=False,
+        ),
+        Region(
+            id="sgp",
+            slug="sgp",
+            display_name="Asia (Singapore)",
+            ip="localhost:8003",
+            status="healthy",
+            disabled=False,
+        ),
+    ]
+    registry.set_regions(regions)
+
+
+def choose_best_region() -> Optional[Region]:
+    regions = registry.list_regions()
+    healthy = [
+        r for r in regions
+        if r.status == "healthy" and not getattr(r, "disabled", False)
+    ]
+    if not healthy:
+        return None
+
+    return min(
+        healthy,
+        key=lambda r: r.latency_ms if r.latency_ms is not None else 999999.0,
+    )
+
+
 class DeployRequest(BaseModel):
     regions: list[str] = ["ewr", "ams", "sgp"]
     model: str = "stable-diffusion-stub"
+
 
 class InferRequest(BaseModel):
     deployment_id: str | None = None
     prompt: str
     params: dict | None = None
 
+
 @app.on_event("startup")
 async def startup_event():
-    regions = [
-        Region(
-            id="ewr-1",
-            slug="ewr",
-            display_name="US-East (EWR)",
-            ip="127.0.0.1:8001",
-            status="starting"
-        ),
-        Region(
-            id="ams-1",
-            slug="ams",
-            display_name="EU (Amsterdam)",
-            ip="127.0.0.1:8002",
-            status="starting"
-        ),
-        Region(
-            id="sgp-1",
-            slug="sgp",
-            display_name="Asia (Singapore)",
-            ip="127.0.0.1:8003",
-            status="starting"
-        )
-    ]
-    registry.set_regions(regions)
+    if MODE == "mock":
+        seed_mock_regions()
+
     asyncio.create_task(health_check_loop())
+
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "control-plane"}
+    return {"status": "ok", "service": "control-plane", "mode": MODE}
+
 
 @app.post("/deploy/global")
 async def deploy_global(req: DeployRequest):
     if MODE == "mock":
+        seed_mock_regions()
         return {
             "deployment_id": "mock-deployment",
             "regions": [r.model_dump() for r in registry.list_regions()],
@@ -103,35 +137,46 @@ async def deploy_global(req: DeployRequest):
 async def list_regions():
     return {
         "deployment_id": "demo-deployment",
-        "regions": [r.model_dump() for r in registry.list_regions()]
+        "regions": [r.model_dump() for r in registry.list_regions()],
     }
+
 
 @app.post("/infer")
-async def infer(req: InferRequest):
-    regions = registry.get_healthy_sorted()
-    if not regions:
-        return {"error": "no healthy regions"}
-    target = regions[0]
-    url = f"http://{target.ip}/infer"
+async def infer_endpoint(req: InferRequest):
+    region = choose_best_region()
+    if region is None:
+        return JSONResponse(
+            status_code=200,
+            content={"error": "no healthy regions"},
+        )
 
-    payload = {
-        "prompt": req.prompt,
-        "steps": (req.params or {}).get("steps", 20)
-    }
+    start = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"http://{region.ip}/infer",
+                json={"prompt": req.prompt},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError:
+        registry.update_region(region.id, status="down", latency_ms=None)
+        return JSONResponse(
+            status_code=200,
+            content={"error": "region unavailable"},
+        )
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        start = time.perf_counter()
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        latency_ms = int((time.perf_counter() - start) * 1000)
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    registry.update_region(region.id, status="healthy", latency_ms=latency_ms)
 
     return {
-        "region_id": target.id,
-        "region_slug": target.slug,
+        "prompt": req.prompt,
+        "image_url": data.get("image_url"),
+        "region_id": region.id,
+        "region_slug": region.slug,
         "latency_ms": latency_ms,
-        "image_url": data.get("image_url")
     }
+
 
 @app.post("/kill/{region_id}")
 async def kill_region(region_id: str):
@@ -142,6 +187,7 @@ async def kill_region(region_id: str):
     await delete_instance(region_id)
     registry.update_region(region_id, status="down", latency_ms=None, disabled=True)
     return {"region_id": region_id, "status": "terminating"}
+
 
 async def health_check_loop():
     while True:
@@ -161,14 +207,13 @@ async def health_check_loop():
                         r.id,
                         status="healthy",
                         latency_ms=latency_ms,
-                        last_checked_at=datetime.utcnow()
+                        last_checked_at=datetime.utcnow(),
                     )
                 except Exception:
                     registry.update_region(
                         r.id,
                         status="down",
                         latency_ms=None,
-                        last_checked_at=datetime.utcnow()
+                        last_checked_at=datetime.utcnow(),
                     )
         await asyncio.sleep(3)
-
