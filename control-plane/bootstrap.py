@@ -10,7 +10,7 @@ apt-get install -y python3 python3-venv git
 mkdir -p /opt/infrazero
 cd /opt/infrazero
 
-# Clone repo if not exists
+# clone repo if not exists
 if [ ! -d "infrazero" ]; then
   git clone https://github.com/khan-mubeen/infrazero.git
 fi
