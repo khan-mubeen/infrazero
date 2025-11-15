@@ -4,6 +4,12 @@ import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Image from "next/image";
 import { deployGlobal, fetchRegions, infer, killRegion } from "../lib/api";
 
+const MIN_REFRESH_TIME = 600;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 type Region = {
   id: string;
   slug: string;
@@ -52,8 +58,6 @@ const EXAMPLE_PROMPTS = [
   "mountain landscape at sunset",
   "futuristic city skyline", 
   "ocean waves crashing on beach",
-  "northern lights in the sky",
-  "tropical island paradise",
 ];
 
 export default function Home() {
@@ -74,6 +78,8 @@ export default function Home() {
 
   const [refreshInterval, setRefreshInterval] = useState<number>(15000);
   const lastRefreshTimeRef = useRef<number>(0);
+  const [isManualRefreshing, setIsManualRefreshing] = useState<boolean>(false);
+  const loadingLockRef = useRef<boolean>(false);
 
   const appendLog = useCallback((message: string) => {
     const now = new Date();
@@ -83,26 +89,25 @@ export default function Home() {
         timestamp: formatTime(now),
         message,
       },
-      ...prev.slice(0, 50), // Keep only last 50 logs
+      ...prev.slice(0, 50),
     ]);
   }, []);
 
-  // Fix: Improved loadRegions with proper throttling
   const loadRegions = useCallback(async (force: boolean = false) => {
-    // Do not start another load if one is already in progress (unless forced)
-    if (isLoadingRegions && !force) return;
+    if (loadingLockRef.current && !force) return;
 
     const now = Date.now();
     const last = lastRefreshTimeRef.current;
 
-    // Prevent too frequent refreshes (min 2 seconds between auto-refreshes)
     if (!force && now - last < 2000) {
       return;
     }
 
+    loadingLockRef.current = true;
     setIsLoadingRegions(true);
+    
     try {
-      const data = (await fetchRegions()) as RegionsResponse;
+      const data = await fetchRegions() as RegionsResponse;
       if (data.deployment_id) {
         setDeploymentId(data.deployment_id);
       }
@@ -130,24 +135,40 @@ export default function Home() {
     } catch (e) {
       const msg = (e as Error).message || "Unknown error";
       setError("Failed to load regions");
-      appendLog(`❌ Failed to load regions: ${msg}`);
+      appendLog(`Failed to load regions: ${msg}`);
     } finally {
       setIsLoadingRegions(false);
+      loadingLockRef.current = false;
     }
-  }, [appendLog, isLoadingRegions]);
+  }, [appendLog]);
 
-  // Fix: Improved useEffect with better refresh control
+  const doSmoothRefreshRef = useRef<(() => Promise<void>) | null>(null);
+  
+  doSmoothRefreshRef.current = async () => {
+    if (isManualRefreshing) return;
+
+    setIsManualRefreshing(true);
+    const start = Date.now();
+
+    await loadRegions(true);
+
+    const elapsed = Date.now() - start;
+    if (elapsed < MIN_REFRESH_TIME) {
+      await sleep(MIN_REFRESH_TIME - elapsed);
+    }
+
+    setIsManualRefreshing(false);
+  };
+  
   useEffect(() => {
-    loadRegions(true); // Initial load
-    
-    if (refreshInterval <= 0) return; // Manual refresh mode
-    
+    if (refreshInterval === 0) return;
+
     const interval = setInterval(() => {
-      loadRegions();
+      doSmoothRefreshRef.current?.();
     }, refreshInterval);
-    
+
     return () => clearInterval(interval);
-  }, [loadRegions, refreshInterval]);
+  }, [refreshInterval]);
 
   const hasHealthyRegion = useMemo(
     () => regions.some((r) => r.status === "healthy" && !r.disabled),
@@ -159,7 +180,6 @@ export default function Home() {
     [regions]
   );
 
-  // Fix: Count killed regions properly
   const killedCount = useMemo(
     () => regions.filter((r) => r.status === "killed" || r.status === "down").length,
     [regions]
@@ -170,7 +190,7 @@ export default function Home() {
     
     setIsDeploying(true);
     setError(null);
-    appendLog("🚀 Deploying global infrastructure...");
+    appendLog("Deploying global infrastructure...");
 
     try {
       const data = await deployGlobal();
@@ -178,37 +198,35 @@ export default function Home() {
 
       if (newDeploymentId) {
         setDeploymentId(newDeploymentId);
-        appendLog(`✅ Deployment started: ${newDeploymentId}`);
+        appendLog(`Deployment started: ${newDeploymentId}`);
       }
 
       if (data && Array.isArray(data.regions)) {
         setRegions(data.regions);
-        appendLog(`✅ Deployed ${data.regions.length} regions`);
+        appendLog(`Deployed ${data.regions.length} regions`);
       } else {
         await loadRegions(true);
       }
     } catch (e) {
       const msg = (e as Error).message || "Unknown error";
       setError("Deployment failed");
-      appendLog(`❌ Deploy failed: ${msg}`);
+      appendLog(`Deploy failed: ${msg}`);
     } finally {
       setIsDeploying(false);
     }
   }, [appendLog, isDeploying, loadRegions]);
 
-  // Fix: Improved kill region logic
   const handleKill = useCallback(
     async (region: Region) => {
       if (isKillDisabled(region) || killingRegion) return;
       
       setKillingRegion(region.id);
-      appendLog(`💀 Killing region: ${region.display_name}`);
+      appendLog(`Killing region: ${region.display_name}`);
       setError(null);
 
       try {
         await killRegion(region.id);
         
-        // Fix: Immediately update UI to show killed status
         setRegions(currentRegions => 
           currentRegions.map(r => 
             r.id === region.id 
@@ -217,9 +235,8 @@ export default function Home() {
           )
         );
         
-        appendLog(`✅ Region killed: ${region.display_name}`);
+        appendLog(`Region killed: ${region.display_name}`);
         
-        // Small delay before refreshing to show the killed state
         setTimeout(() => {
           loadRegions(true);
         }, 1000);
@@ -227,7 +244,7 @@ export default function Home() {
       } catch (e) {
         const msg = (e as Error).message || "Unknown error";
         setError(`Failed to kill region`);
-        appendLog(`❌ Kill failed: ${msg}`);
+        appendLog(`Kill failed: ${msg}`);
       } finally {
         setKillingRegion(null);
       }
@@ -243,10 +260,10 @@ export default function Home() {
     setLastResult(null);
 
     const trimmedPrompt = prompt.trim();
-    appendLog(`🎨 Generating: "${trimmedPrompt}"`);
+    appendLog(`Generating: "${trimmedPrompt}"`);
 
     try {
-      const data = (await infer(trimmedPrompt)) as LastResult;
+      const data = await infer(trimmedPrompt) as LastResult;
       const finalResult: LastResult = {
         ...data,
         prompt: trimmedPrompt,
@@ -255,11 +272,11 @@ export default function Home() {
       setLastResult(finalResult);
 
       if (data.error) {
-        appendLog(`❌ Generation error: ${data.error}`);
+        appendLog(`Generation error: ${data.error}`);
       } else {
         const regionLabel = data.region_name || data.region_slug || "unknown";
         const latency = data.latency_ms || 0;
-        appendLog(`✅ Generated from ${regionLabel} (${latency}ms)`);
+        appendLog(`Generated from ${regionLabel} (${latency}ms)`);
       }
     } catch (e) {
       const msg = (e as Error).message || "Unknown error";
@@ -268,7 +285,7 @@ export default function Home() {
         error: "Service unavailable",
       });
       setError("Generation failed");
-      appendLog(`❌ Generation failed: ${msg}`);
+      appendLog(`Generation failed: ${msg}`);
     } finally {
       setIsGenerating(false);
     }
@@ -278,15 +295,14 @@ export default function Home() {
     setPrompt(examplePrompt);
   }, []);
 
-  // Fix: Manual refresh handler
-  const handleManualRefresh = useCallback(() => {
-    loadRegions(true);
-  }, [loadRegions]);
+  const handleManualRefresh = useCallback(async () => {
+    await doSmoothRefreshRef.current?.();
+  }, []);
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-50">
       <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-6 sm:px-6 lg:px-8">
-        {/* Header */}
+        
         <header className="mb-6 flex items-start justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold text-white sm:text-4xl">
@@ -314,13 +330,12 @@ export default function Home() {
             </span>
             {error && (
               <span className="max-w-xs rounded-lg bg-red-500/10 border border-red-500/30 px-2 py-1 text-xs text-red-300">
-                ⚠️ {error}
+                {error}
               </span>
             )}
           </div>
         </header>
 
-        {/* Stats */}
         <div className="mb-6 grid grid-cols-4 gap-4">
           <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-3">
             <p className="text-xs text-slate-400">Regions</p>
@@ -342,10 +357,9 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Controls */}
         <section className="mb-6 grid gap-4 lg:grid-cols-2">
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-            <h2 className="mb-3 text-base font-semibold text-slate-100">🎛️ Orchestration</h2>
+            <h2 className="mb-3 text-base font-semibold text-slate-100">Orchestration</h2>
             <p className="mb-4 text-sm text-slate-400">
               Deploy globally, kill regions live to test failover.
             </p>
@@ -359,19 +373,18 @@ export default function Home() {
                     : "bg-sky-600 text-white hover:bg-sky-500"
                 }`}
               >
-                {isDeploying ? "🚀 Deploying..." : "🚀 Deploy Global"}
+                {isDeploying ? "Deploying..." : "Deploy Global"}
               </button>
               <button
                 onClick={handleManualRefresh}
-                disabled={isLoadingRegions}
-                className="rounded-xl border border-slate-600 bg-slate-800/60 px-4 py-2.5 text-sm text-slate-100 hover:bg-slate-700/80"
+                disabled={isManualRefreshing}
+                className="rounded-xl border border-slate-600 bg-slate-800/60 px-4 py-2.5 text-sm text-slate-100 hover:bg-slate-700/80 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isLoadingRegions ? "Refreshing..." : "🔄 Refresh"}
+                {isManualRefreshing ? "Refreshing..." : "Refresh"}
               </button>
               
-              {/* Fix: Refresh rate control */}
               <div className="flex items-center gap-2">
-                <label className="text-xs text-slate-400">Refresh:</label>
+                <label className="text-xs text-slate-400">Auto-refresh:</label>
                 <select 
                   value={refreshInterval}
                   onChange={(e) => setRefreshInterval(Number(e.target.value))}
@@ -379,15 +392,16 @@ export default function Home() {
                 >
                   <option value="0">Manual</option>
                   <option value="5000">5s</option>
-                  <option value="8000">8s</option>
+                  <option value="10000">10s</option>
                   <option value="15000">15s</option>
+                  <option value="30000">30s</option>
                 </select>
               </div>
             </div>
           </div>
 
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-            <h2 className="mb-3 text-base font-semibold text-slate-100">🎨 Image Generation</h2>
+            <h2 className="mb-3 text-base font-semibold text-slate-100">Image Generation</h2>
             <div className="space-y-3">
               <div>
                 <label className="mb-1.5 block text-xs text-slate-300">Prompt</label>
@@ -395,15 +409,21 @@ export default function Home() {
                   rows={2}
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleGenerate();
+                    }
+                  }}
                   className="w-full rounded-xl border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
                   placeholder="Describe what you want to generate..."
                 />
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {EXAMPLE_PROMPTS.slice(0, 3).map((example, idx) => (
+                  {EXAMPLE_PROMPTS.map((example, idx) => (
                     <button
                       key={idx}
                       onClick={() => handleExamplePrompt(example)}
-                      className="rounded-lg border border-slate-700 bg-slate-800/50 px-2 py-1 text-[10px] text-slate-400 hover:bg-slate-700/50"
+                      className="rounded-lg border border-slate-700 bg-slate-800/50 px-2 py-1 text-[10px] text-slate-400 hover:bg-slate-700/50 transition"
                     >
                       {example}
                     </button>
@@ -420,13 +440,13 @@ export default function Home() {
                       : "bg-emerald-600 text-white hover:bg-emerald-500"
                   }`}
                 >
-                  {isGenerating ? "⏳ Generating..." : "✨ Generate"}
+                  {isGenerating ? "Generating..." : "Generate"}
                 </button>
                 <div className="text-xs text-slate-400">
                   {healthyCount > 0 ? (
-                    <span className="text-emerald-400">✓ {healthyCount} ready</span>
+                    <span className="text-emerald-400">{healthyCount} ready</span>
                   ) : (
-                    <span className="text-red-400">⚠️ No regions</span>
+                    <span className="text-red-400">No regions</span>
                   )}
                 </div>
               </div>
@@ -434,12 +454,10 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Main Content */}
         <section className="grid flex-1 gap-6 lg:grid-cols-[1.5fr,1fr]">
-          {/* Regions */}
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-base font-semibold text-slate-100">🌍 Regions</h2>
+              <h2 className="text-base font-semibold text-slate-100">Regions</h2>
               <span className="text-xs text-slate-500">
                 {healthyCount} healthy, {killedCount} killed
               </span>
@@ -451,7 +469,7 @@ export default function Home() {
                   region.status === "killed" || region.status === "down"
                     ? "border-red-500/50 bg-red-900/20"
                     : "border-slate-700/50 bg-slate-900/90"
-                } p-4`}>
+                } p-4 transition-all`}>
                   <div className="space-y-2">
                     <div className="flex items-start justify-between gap-2">
                       <div>
@@ -488,8 +506,8 @@ export default function Home() {
                           : "border border-red-500/50 bg-red-600/20 text-red-300 hover:bg-red-600/40"
                       }`}
                     >
-                      {killingRegion === region.id ? "💀 Killing..." : 
-                       region.status === "killed" || region.status === "down" ? "💀 Killed" : "💀 Kill Region"}
+                      {killingRegion === region.id ? "Killing..." : 
+                       region.status === "killed" || region.status === "down" ? "Killed" : "Kill Region"}
                     </button>
                   </div>
                 </div>
@@ -497,14 +515,11 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Right Column */}
           <div className="flex flex-col gap-4">
-            {/* Result */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-              <h2 className="mb-3 text-base font-semibold text-slate-100">🖼️ Result</h2>
+              <h2 className="mb-3 text-base font-semibold text-slate-100">Result</h2>
               {lastResult ? (
                 <div className="space-y-3">
-                  {/* Show region and latency FIRST, before the image */}
                   {!lastResult.error && (
                     <div className="text-xs text-slate-400 space-y-1">
                       <p>Region: <span className="font-semibold text-sky-300">
@@ -516,7 +531,6 @@ export default function Home() {
                     </div>
                   )}
                   
-                  {/* Then show the image */}
                   {lastResult.image_url && (
                     <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
                       <Image
@@ -530,7 +544,6 @@ export default function Home() {
                     </div>
                   )}
                   
-                  {/* Error message stays at the bottom */}
                   {lastResult.error && (
                     <p className="rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2 text-xs text-red-300">
                       {lastResult.error}
@@ -542,11 +555,13 @@ export default function Home() {
               )}
             </div>
 
-            {/* Logs */}
             <div className="flex-1 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
               <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-base font-semibold text-slate-100">📋 Event Log</h2>
-                <button onClick={() => setLogs([])} className="text-xs text-slate-500 hover:text-slate-300">
+                <h2 className="text-base font-semibold text-slate-100">Event Log</h2>
+                <button 
+                  onClick={() => setLogs([])} 
+                  className="text-xs text-slate-500 hover:text-slate-300 transition"
+                >
                   Clear
                 </button>
               </div>
