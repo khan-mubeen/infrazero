@@ -8,26 +8,40 @@ import asyncio
 app = FastAPI()
 
 REGION = os.getenv("REGION", "unknown")
+ENGINE = os.getenv("ENGINE", "mock")
+
 
 class InferRequest(BaseModel):
     prompt: str
     steps: int | None = 20
+
 
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
         "region": REGION,
-        "model": "stable-diffusion-stub"
+        "engine": ENGINE,
+        "model": "stable-diffusion-stub",
     }
+
+
+async def generate_mock_image(req: InferRequest) -> str:
+    # simple picsum stub
+    return f"https://picsum.photos/seed/{REGION}-{random.randint(1, 10000)}/512/512"
+
 
 @app.post("/infer")
 async def infer(req: InferRequest):
     start = time.perf_counter()
-    await asyncio.sleep(1.0)
+
+    # for now we only use mock engine
+    image_url = await generate_mock_image(req)
+
     duration_ms = int((time.perf_counter() - start) * 1000)
     return {
-        "image_url": f"https://picsum.photos/seed/{REGION}-{random.randint(1, 10000)}/512/512",
+        "image_url": image_url,
         "region": REGION,
-        "duration_ms": duration_ms
+        "engine": ENGINE,
+        "duration_ms": duration_ms,
     }
