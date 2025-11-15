@@ -71,7 +71,7 @@ async def health():
 async def deploy_global(req: DeployRequest):
     if MODE == "mock":
         return {
-            "deployment_id": "demo-deployment",
+            "deployment_id": "mock-deployment",
             "regions": [r.model_dump() for r in registry.list_regions()],
         }
 
@@ -138,10 +138,10 @@ async def kill_region(region_id: str):
     if MODE == "mock":
         registry.update_region(region_id, status="down", latency_ms=None, disabled=True)
         return {"region_id": region_id, "status": "down (mock)"}
-    else:
-        await delete_instance(region_id)
-        registry.update_region(region_id, status="down", latency_ms=None, disabled=True)
-        return {"region_id": region_id, "status": "terminating"}
+
+    await delete_instance(region_id)
+    registry.update_region(region_id, status="down", latency_ms=None, disabled=True)
+    return {"region_id": region_id, "status": "terminating"}
 
 async def health_check_loop():
     while True:
