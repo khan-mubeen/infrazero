@@ -72,7 +72,7 @@ export default function Home() {
 
   const [logs, setLogs] = useState<EventLogItem[]>([]);
 
-  const [refreshInterval, setRefreshInterval] = useState<number>(8000);
+  const [refreshInterval, setRefreshInterval] = useState<number>(15000);
   const lastRefreshTimeRef = useRef<number>(0);
 
   const appendLog = useCallback((message: string) => {
@@ -504,6 +504,19 @@ export default function Home() {
               <h2 className="mb-3 text-base font-semibold text-slate-100">🖼️ Result</h2>
               {lastResult ? (
                 <div className="space-y-3">
+                  {/* Show region and latency FIRST, before the image */}
+                  {!lastResult.error && (
+                    <div className="text-xs text-slate-400 space-y-1">
+                      <p>Region: <span className="font-semibold text-sky-300">
+                        {lastResult.region_name || lastResult.region_slug}
+                      </span></p>
+                      {lastResult.latency_ms && (
+                        <p>Latency: <span className="font-mono text-emerald-300">{lastResult.latency_ms}ms</span></p>
+                      )}
+                    </div>
+                  )}
+                  
+                  {/* Then show the image */}
                   {lastResult.image_url && (
                     <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
                       <Image
@@ -516,20 +529,12 @@ export default function Home() {
                       />
                     </div>
                   )}
+                  
+                  {/* Error message stays at the bottom */}
                   {lastResult.error && (
                     <p className="rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2 text-xs text-red-300">
                       {lastResult.error}
                     </p>
-                  )}
-                  {!lastResult.error && lastResult.image_url && (
-                    <div className="text-xs text-slate-400">
-                      <p>Region: <span className="font-semibold text-sky-300">
-                        {lastResult.region_name || lastResult.region_slug}
-                      </span></p>
-                      {lastResult.latency_ms && (
-                        <p>Latency: <span className="font-mono text-emerald-300">{lastResult.latency_ms}ms</span></p>
-                      )}
-                    </div>
                   )}
                 </div>
               ) : (
