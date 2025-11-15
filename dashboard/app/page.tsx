@@ -15,6 +15,7 @@ export default function Home() {
   const [regions, setRegions] = useState<Region[]>([]);
   const [loading, setLoading] = useState(false);
   const [prompt, setPrompt] = useState("");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [lastResult, setLastResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
