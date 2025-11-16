@@ -25,6 +25,17 @@ type RegionsResponse = {
   regions: Region[];
 };
 
+type RegionResult = {
+  region_id: string;
+  region_slug: string;
+  region_name: string;
+  latency_ms?: number | null;
+  image_url?: string | null;
+  engine?: string | null;
+  effect?: string | null;
+  error?: string | null;
+};
+
 type LastResult = {
   prompt?: string;
   image_url?: string;
@@ -32,7 +43,9 @@ type LastResult = {
   region_slug?: string;
   region_name?: string;
   latency_ms?: number;
+  effect?: string;
   error?: string;
+  results?: RegionResult[];
 };
 
 type EventLogItem = {
@@ -56,7 +69,7 @@ function isKillDisabled(region: Region): boolean {
 
 const EXAMPLE_PROMPTS = [
   "mountain landscape at sunset",
-  "futuristic city skyline", 
+  "futuristic city skyline",
   "ocean waves crashing on beach",
 ];
 
@@ -76,10 +89,14 @@ export default function Home() {
 
   const [logs, setLogs] = useState<EventLogItem[]>([]);
 
-  const [refreshInterval, setRefreshInterval] = useState<number>(15000);
+  // default = Manual (0)
+  const [refreshInterval, setRefreshInterval] = useState<number>(0);
   const lastRefreshTimeRef = useRef<number>(0);
   const [isManualRefreshing, setIsManualRefreshing] = useState<boolean>(false);
   const loadingLockRef = useRef<boolean>(false);
+
+  const [progressByRegion, setProgressByRegion] = useState<Record<string, number>>({});
+  const progressTimerRef = useRef<number | null>(null);
 
   const appendLog = useCallback((message: string) => {
     const now = new Date();
@@ -93,57 +110,63 @@ export default function Home() {
     ]);
   }, []);
 
-  const loadRegions = useCallback(async (force: boolean = false) => {
-    if (loadingLockRef.current && !force) return;
+  const loadRegions = useCallback(
+    async (force: boolean = false) => {
+      if (loadingLockRef.current && !force) return;
 
-    const now = Date.now();
-    const last = lastRefreshTimeRef.current;
+      const now = Date.now();
+      const last = lastRefreshTimeRef.current;
 
-    if (!force && now - last < 2000) {
-      return;
-    }
-
-    loadingLockRef.current = true;
-    setIsLoadingRegions(true);
-    
-    try {
-      const data = await fetchRegions() as RegionsResponse;
-      if (data.deployment_id) {
-        setDeploymentId(data.deployment_id);
+      if (!force && now - last < 2000) {
+        return;
       }
 
-      if (Array.isArray(data.regions)) {
-        setRegions(currentRegions => {
-          return data.regions.map(newRegion => {
-            const currentRegion = currentRegions.find(r => r.id === newRegion.id);
-            if (currentRegion && (currentRegion.status === "killed" || currentRegion.status === "down")) {
-              return {
-                ...newRegion,
-                status: "killed",
-                latency_ms: null,
-              };
-            }
-            return newRegion;
+      loadingLockRef.current = true;
+      setIsLoadingRegions(true);
+
+      try {
+        const data = (await fetchRegions()) as RegionsResponse;
+        if (data.deployment_id) {
+          setDeploymentId(data.deployment_id);
+        }
+
+        if (Array.isArray(data.regions)) {
+          setRegions((currentRegions) => {
+            return data.regions.map((newRegion) => {
+              const currentRegion = currentRegions.find((r) => r.id === newRegion.id);
+              if (
+                currentRegion &&
+                (currentRegion.status === "killed" || currentRegion.status === "down")
+              ) {
+                return {
+                  ...newRegion,
+                  status: "killed",
+                  latency_ms: null,
+                };
+              }
+              return newRegion;
+            });
           });
-        });
-      } else {
-        setRegions([]);
-      }
+        } else {
+          setRegions([]);
+        }
 
-      lastRefreshTimeRef.current = now;
-      setError(null);
-    } catch (e) {
-      const msg = (e as Error).message || "Unknown error";
-      setError("Failed to load regions");
-      appendLog(`Failed to load regions: ${msg}`);
-    } finally {
-      setIsLoadingRegions(false);
-      loadingLockRef.current = false;
-    }
-  }, [appendLog]);
+        lastRefreshTimeRef.current = now;
+        setError(null);
+      } catch (e) {
+        const msg = (e as Error).message || "Unknown error";
+        setError("Failed to load regions");
+        appendLog(`Failed to load regions: ${msg}`);
+      } finally {
+        setIsLoadingRegions(false);
+        loadingLockRef.current = false;
+      }
+    },
+    [appendLog]
+  );
 
   const doSmoothRefreshRef = useRef<(() => Promise<void>) | null>(null);
-  
+
   doSmoothRefreshRef.current = async () => {
     if (isManualRefreshing) return;
 
@@ -159,7 +182,7 @@ export default function Home() {
 
     setIsManualRefreshing(false);
   };
-  
+
   useEffect(() => {
     if (refreshInterval === 0) return;
 
@@ -185,16 +208,53 @@ export default function Home() {
     [regions]
   );
 
+  const pipelineSummary = useMemo(() => {
+    if (!lastResult || !lastResult.results || lastResult.results.length === 0) {
+      return null;
+    }
+    const valid = lastResult.results.filter(
+      (r) => typeof r.latency_ms === "number"
+    ) as RegionResult[];
+    if (valid.length === 0) return null;
+
+    const count = valid.length;
+    let fastest = valid[0];
+    let sum = 0;
+
+    for (const r of valid) {
+      const lat = r.latency_ms || 0;
+      sum += lat;
+      if (
+        (r.latency_ms || Number.MAX_SAFE_INTEGER) <
+        (fastest.latency_ms || Number.MAX_SAFE_INTEGER)
+      ) {
+        fastest = r;
+      }
+    }
+
+    const averageLatency = sum / count;
+    const parallelTime = Math.min(...valid.map((r) => r.latency_ms || 0));
+
+    return {
+      count,
+      fastestName: fastest.region_name || fastest.region_slug,
+      fastestLatency: Math.round(fastest.latency_ms || 0),
+      averageLatency: Math.round(averageLatency),
+      parallelTime: Math.round(parallelTime),
+    };
+  }, [lastResult]);
+
   const handleDeploy = useCallback(async () => {
     if (isDeploying) return;
-    
+
     setIsDeploying(true);
     setError(null);
     appendLog("Deploying global infrastructure...");
 
     try {
       const data = await deployGlobal();
-      const newDeploymentId = data?.deployment_id || (MODE === "mock" ? "mock-deployment" : null);
+      const newDeploymentId =
+        data?.deployment_id || (MODE === "mock" ? "mock-deployment" : null);
 
       if (newDeploymentId) {
         setDeploymentId(newDeploymentId);
@@ -219,31 +279,34 @@ export default function Home() {
   const handleKill = useCallback(
     async (region: Region) => {
       if (isKillDisabled(region) || killingRegion) return;
-      
+
       setKillingRegion(region.id);
       appendLog(`Killing region: ${region.display_name}`);
       setError(null);
 
       try {
         await killRegion(region.id);
-        
-        setRegions(currentRegions => 
-          currentRegions.map(r => 
-            r.id === region.id 
-              ? { ...r, status: "killed", latency_ms: null }
+
+        setRegions((currentRegions) =>
+          currentRegions.map((r) =>
+            r.id === region.id
+              ? {
+                  ...r,
+                  status: "killed",
+                  latency_ms: null,
+                }
               : r
           )
         );
-        
+
         appendLog(`Region killed: ${region.display_name}`);
-        
+
         setTimeout(() => {
           loadRegions(true);
         }, 1000);
-        
       } catch (e) {
         const msg = (e as Error).message || "Unknown error";
-        setError(`Failed to kill region`);
+        setError("Failed to kill region");
         appendLog(`Kill failed: ${msg}`);
       } finally {
         setKillingRegion(null);
@@ -259,11 +322,39 @@ export default function Home() {
     setError(null);
     setLastResult(null);
 
+    if (progressTimerRef.current !== null) {
+      window.clearInterval(progressTimerRef.current);
+      progressTimerRef.current = null;
+    }
+
+    const activeRegions = regions.filter(
+      (r) => r.status === "healthy" && !r.disabled
+    );
+    const initialProgress: Record<string, number> = {};
+    activeRegions.forEach((r) => {
+      initialProgress[r.id] = 5 + Math.random() * 15;
+    });
+    setProgressByRegion(initialProgress);
+
+    if (activeRegions.length > 0) {
+      progressTimerRef.current = window.setInterval(() => {
+        setProgressByRegion((prev) => {
+          const next: Record<string, number> = { ...prev };
+          Object.keys(next).forEach((id) => {
+            if (next[id] < 95) {
+              next[id] = Math.min(95, next[id] + 5 + Math.random() * 10);
+            }
+          });
+          return next;
+        });
+      }, 250);
+    }
+
     const trimmedPrompt = prompt.trim();
     appendLog(`Generating: "${trimmedPrompt}"`);
 
     try {
-      const data = await infer(trimmedPrompt) as LastResult;
+      const data = (await infer(trimmedPrompt)) as LastResult;
       const finalResult: LastResult = {
         ...data,
         prompt: trimmedPrompt,
@@ -271,12 +362,26 @@ export default function Home() {
 
       setLastResult(finalResult);
 
+      if (!data.error && data.results && data.results.length > 0) {
+        const summary = data.results
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .map((r: any) => {
+            const eff = r.effect || r.engine || "n/a";
+            const lat =
+              r.latency_ms != null ? `${Math.round(r.latency_ms)}ms` : "fail";
+            return `${r.region_slug}:${eff}(${lat})`;
+          })
+          .join(", ");
+
+        appendLog(`Multi-region pipeline → ${summary}`);
+      }
+
       if (data.error) {
         appendLog(`Generation error: ${data.error}`);
       } else {
         const regionLabel = data.region_name || data.region_slug || "unknown";
         const latency = data.latency_ms || 0;
-        appendLog(`Generated from ${regionLabel} (${latency}ms)`);
+        appendLog(`Generated from ${regionLabel} (${Math.round(latency)}ms)`);
       }
     } catch (e) {
       const msg = (e as Error).message || "Unknown error";
@@ -287,9 +392,14 @@ export default function Home() {
       setError("Generation failed");
       appendLog(`Generation failed: ${msg}`);
     } finally {
+      if (progressTimerRef.current !== null) {
+        window.clearInterval(progressTimerRef.current);
+        progressTimerRef.current = null;
+      }
+      setProgressByRegion({});
       setIsGenerating(false);
     }
-  }, [appendLog, isGenerating, prompt]);
+  }, [appendLog, isGenerating, prompt, regions]);
 
   const handleExamplePrompt = useCallback((examplePrompt: string) => {
     setPrompt(examplePrompt);
@@ -302,7 +412,6 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-50">
       <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-6 sm:px-6 lg:px-8">
-        
         <header className="mb-6 flex items-start justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold text-white sm:text-4xl">
@@ -315,16 +424,19 @@ export default function Home() {
             </p>
             {deploymentId && (
               <p className="mt-2 text-xs text-slate-400">
-                Deployment: <span className="font-mono text-sky-300">{deploymentId}</span>
+                Deployment:{" "}
+                <span className="font-mono text-sky-300">{deploymentId}</span>
               </p>
             )}
           </div>
           <div className="flex flex-col items-end gap-2">
-            <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ${
-              MODE === "mock"
-                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                : "bg-purple-500/20 text-purple-300 border border-purple-500/30"
-            }`}>
+            <span
+              className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium ${
+                MODE === "mock"
+                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                  : "bg-purple-500/20 text-purple-300 border border-purple-500/30"
+              }`}
+            >
               <span className="mr-1.5 h-2 w-2 rounded-full bg-current" />
               {MODE === "mock" ? "Local Demo" : "Vultr Live"}
             </span>
@@ -359,7 +471,9 @@ export default function Home() {
 
         <section className="mb-6 grid gap-4 lg:grid-cols-2">
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-            <h2 className="mb-3 text-base font-semibold text-slate-100">Orchestration</h2>
+            <h2 className="mb-3 text-base font-semibold text-slate-100">
+              Orchestration
+            </h2>
             <p className="mb-4 text-sm text-slate-400">
               Deploy globally, kill regions live to test failover.
             </p>
@@ -382,10 +496,10 @@ export default function Home() {
               >
                 {isManualRefreshing ? "Refreshing..." : "Refresh"}
               </button>
-              
+
               <div className="flex items-center gap-2">
                 <label className="text-xs text-slate-400">Auto-refresh:</label>
-                <select 
+                <select
                   value={refreshInterval}
                   onChange={(e) => setRefreshInterval(Number(e.target.value))}
                   className="rounded-lg border border-slate-600 bg-slate-800/60 px-2 py-1 text-xs text-slate-100"
@@ -401,16 +515,20 @@ export default function Home() {
           </div>
 
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
-            <h2 className="mb-3 text-base font-semibold text-slate-100">Image Generation</h2>
+            <h2 className="mb-3 text-base font-semibold text-slate-100">
+              Image Generation
+            </h2>
             <div className="space-y-3">
               <div>
-                <label className="mb-1.5 block text-xs text-slate-300">Prompt</label>
+                <label className="mb-1.5 block text-xs text-slate-300">
+                  Prompt
+                </label>
                 <textarea
                   rows={2}
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
+                    if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
                       handleGenerate();
                     }
@@ -418,7 +536,7 @@ export default function Home() {
                   className="w-full rounded-xl border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
                   placeholder="Describe what you want to generate..."
                 />
-                <div className="mt-2 flex flex-wrap gap-1.5">
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   {EXAMPLE_PROMPTS.map((example, idx) => (
                     <button
                       key={idx}
@@ -428,6 +546,18 @@ export default function Home() {
                       {example}
                     </button>
                   ))}
+                  <button
+                    onClick={() => {
+                      const random =
+                        EXAMPLE_PROMPTS[
+                          Math.floor(Math.random() * EXAMPLE_PROMPTS.length)
+                        ];
+                      setPrompt(random);
+                    }}
+                    className="ml-1 rounded-lg border border-emerald-600 bg-emerald-600/10 px-2 py-1 text-[10px] font-semibold text-emerald-300 hover:bg-emerald-600/30 transition"
+                  >
+                    🎲 Random
+                  </button>
                 </div>
               </div>
               <div className="flex items-center justify-between gap-3">
@@ -465,35 +595,48 @@ export default function Home() {
 
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {regions.map((region) => (
-                <div key={region.id} className={`rounded-xl border ${
-                  region.status === "killed" || region.status === "down"
-                    ? "border-red-500/50 bg-red-900/20"
-                    : "border-slate-700/50 bg-slate-900/90"
-                } p-4 transition-all`}>
+                <div
+                  key={region.id}
+                  className={`rounded-xl border ${
+                    region.status === "killed" || region.status === "down"
+                      ? "border-red-500/50 bg-red-900/20"
+                      : "border-slate-700/50 bg-slate-900/90"
+                  } p-4 transition-all`}
+                >
                   <div className="space-y-2">
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <p className="text-sm font-semibold text-slate-50">{region.display_name}</p>
-                        <p className="text-xs font-mono uppercase text-slate-400">{region.slug}</p>
+                        <p className="text-sm font-semibold text-slate-50">
+                          {region.display_name}
+                        </p>
+                        <p className="text-xs font-mono uppercase text-slate-400">
+                          {region.slug}
+                        </p>
                       </div>
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                        region.status === "healthy" ? "bg-emerald-400/20 text-emerald-300 border border-emerald-400/30" :
-                        region.status === "starting" ? "bg-amber-400/20 text-amber-300 border border-amber-400/30" :
-                        "bg-red-400/20 text-red-300 border border-red-400/30"
-                      }`}>
+                      <span
+                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                          region.status === "healthy"
+                            ? "bg-emerald-400/20 text-emerald-300 border border-emerald-400/30"
+                            : region.status === "starting"
+                            ? "bg-amber-400/20 text-amber-300 border border-amber-400/30"
+                            : "bg-red-400/20 text-red-300 border border-red-400/30"
+                        }`}
+                      >
                         <span className="mr-1 h-1.5 w-1.5 rounded-full bg-current" />
                         {region.status}
                       </span>
                     </div>
                     <div className="text-xs text-slate-400">
-                      <p>Latency: <span className="font-mono text-sky-300">
-                        {region.status === "killed" || region.status === "down" 
-                          ? "—" 
-                          : typeof region.latency_ms === "number" 
-                            ? `${region.latency_ms}ms` 
-                            : "—"
-                        }
-                      </span></p>
+                      <p>
+                        Network Latency:{" "}
+                        <span className="font-mono text-sky-300">
+                          {region.status === "killed" || region.status === "down"
+                            ? "—"
+                            : typeof region.latency_ms === "number"
+                            ? `${Math.round(region.latency_ms)}ms`
+                            : "—"}
+                        </span>
+                      </p>
                     </div>
                   </div>
                   <div className="mt-4">
@@ -506,8 +649,11 @@ export default function Home() {
                           : "border border-red-500/50 bg-red-600/20 text-red-300 hover:bg-red-600/40"
                       }`}
                     >
-                      {killingRegion === region.id ? "Killing..." : 
-                       region.status === "killed" || region.status === "down" ? "Killed" : "Kill Region"}
+                      {killingRegion === region.id
+                        ? "Killing..."
+                        : region.status === "killed" || region.status === "down"
+                        ? "Killed"
+                        : "Kill Region"}
                     </button>
                   </div>
                 </div>
@@ -518,32 +664,176 @@ export default function Home() {
           <div className="flex flex-col gap-4">
             <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
               <h2 className="mb-3 text-base font-semibold text-slate-100">Result</h2>
+
+              {isGenerating && Object.keys(progressByRegion).length > 0 && (
+                <div className="mb-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-xs">
+                  <p className="mb-2 text-slate-300">
+                    Processing across {Object.keys(progressByRegion).length} regions...
+                  </p>
+                  <div className="space-y-1.5">
+                    {Object.entries(progressByRegion).map(([id, value]) => {
+                      const region = regions.find((r) => r.id === id);
+                      const label = region ? region.display_name : id;
+                      return (
+                        <div key={id}>
+                          <div className="flex justify-between text-[11px] text-slate-400">
+                            <span>{label}</span>
+                            <span>{Math.round(value)}%</span>
+                          </div>
+                          <div className="mt-0.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                            <div
+                              className="h-full bg-sky-500 transition-all"
+                              style={{ width: `${Math.min(100, value)}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {lastResult ? (
                 <div className="space-y-3">
                   {!lastResult.error && (
                     <div className="text-xs text-slate-400 space-y-1">
-                      <p>Region: <span className="font-semibold text-sky-300">
-                        {lastResult.region_name || lastResult.region_slug}
-                      </span></p>
-                      {lastResult.latency_ms && (
-                        <p>Latency: <span className="font-mono text-emerald-300">{lastResult.latency_ms}ms</span></p>
+                      <p>
+                        Primary result from{" "}
+                        <span className="font-semibold text-sky-300">
+                          {lastResult.region_name || lastResult.region_slug}
+                        </span>
+                      </p>
+                      {lastResult.effect && (
+                        <p>
+                          Effect:{" "}
+                          <span className="font-mono text-emerald-300">
+                            {lastResult.effect}
+                          </span>
+                        </p>
+                      )}
+                      {typeof lastResult.latency_ms === "number" && (
+                        <p>
+                          Total pipeline time:{" "}
+                          <span className="font-mono text-emerald-300">
+                            {Math.round(lastResult.latency_ms)}ms
+                          </span>
+                        </p>
                       )}
                     </div>
                   )}
-                  
+
                   {lastResult.image_url && (
-                    <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
-                      <Image
-                        src={lastResult.image_url}
-                        alt="Generated"
-                        width={512}
-                        height={512}
-                        className="w-full object-cover"
-                        unoptimized
-                      />
+                    <div className="flex justify-center">
+                      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
+                        <Image
+                          src={lastResult.image_url}
+                          alt="Generated"
+                          width={768}
+                          height={768}
+                          className="w-full max-w-md object-cover rounded-xl"
+                          unoptimized
+                        />
+                      </div>
                     </div>
                   )}
-                  
+
+                  {lastResult.results && lastResult.results.length > 0 && (
+                    <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+                      <h3 className="mb-2 text-sm font-semibold text-slate-100">
+                        Multi-region pipeline comparison
+                      </h3>
+                      <p className="mb-3 text-xs text-slate-400">
+                        Same base image processed in parallel across all regions.
+                      </p>
+                      <div className="grid gap-3 sm:grid-cols-3">
+                        {lastResult.results.map((r) => {
+                          const isWinner = r.region_id === lastResult.region_id;
+                          return (
+                            <div
+                              key={r.region_id}
+                              className={`rounded-xl border p-2 ${
+                                isWinner
+                                  ? "border-emerald-500/70 bg-emerald-500/5 shadow-[0_0_0_1px_rgba(16,185,129,0.6)]"
+                                  : "border-slate-700/60 bg-slate-900/80"
+                              }`}
+                            >
+                              {r.image_url && (
+                                <div className="mb-2 overflow-hidden rounded-lg border border-slate-800 bg-slate-950">
+                                  <Image
+                                    src={r.image_url}
+                                    alt={r.region_name}
+                                    width={256}
+                                    height={256}
+                                    className="w-full object-cover"
+                                    unoptimized
+                                  />
+                                </div>
+                              )}
+                              <p className="text-[11px] font-semibold text-slate-100">
+                                {r.region_name}{" "}
+                                <span className="text-slate-500">
+                                  ({r.region_slug})
+                                </span>
+                                {isWinner && (
+                                  <span className="ml-1 inline-flex items-center rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-300">
+                                    🏆 FASTEST
+                                  </span>
+                                )}
+                              </p>
+                              <p className="text-[11px] text-slate-400">
+                                Effect:{" "}
+                                <span className="font-mono text-sky-300">
+                                  {r.effect || r.engine || "n/a"}
+                                </span>
+                              </p>
+                              <p className="text-[11px] text-slate-400">
+                                Latency:{" "}
+                                <span className="font-mono text-emerald-300">
+                                  {r.latency_ms != null
+                                    ? `${Math.round(r.latency_ms)}ms`
+                                    : "failed"}
+                                </span>
+                              </p>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {pipelineSummary && (
+                        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/80 p-3 text-xs">
+                          <p className="mb-2 font-semibold text-slate-100">
+                            Pipeline summary
+                          </p>
+                          <p className="text-slate-400">
+                            Regions processed:{" "}
+                            <span className="font-mono text-slate-100">
+                              {pipelineSummary.count}
+                            </span>
+                          </p>
+                          <p className="text-slate-400">
+                            Fastest:{" "}
+                            <span className="font-mono text-emerald-300">
+                              {pipelineSummary.fastestName} (
+                              {pipelineSummary.fastestLatency}ms)
+                            </span>
+                          </p>
+                          <p className="text-slate-400">
+                            Average latency:{" "}
+                            <span className="font-mono text-sky-300">
+                              {pipelineSummary.averageLatency}ms
+                            </span>
+                          </p>
+                          <p className="text-slate-400">
+                            Total parallel time:{" "}
+                            <span className="font-mono text-amber-300">
+                              {pipelineSummary.parallelTime}ms
+                            </span>
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {lastResult.error && (
                     <p className="rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2 text-xs text-red-300">
                       {lastResult.error}
@@ -551,15 +841,17 @@ export default function Home() {
                   )}
                 </div>
               ) : (
-                <p className="text-sm text-slate-400">Generate an image to see results</p>
+                <p className="text-sm text-slate-400">
+                  Generate an image to see results
+                </p>
               )}
             </div>
 
             <div className="flex-1 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-base font-semibold text-slate-100">Event Log</h2>
-                <button 
-                  onClick={() => setLogs([])} 
+                <button
+                  onClick={() => setLogs([])}
                   className="text-xs text-slate-500 hover:text-slate-300 transition"
                 >
                   Clear
@@ -572,7 +864,8 @@ export default function Home() {
                   <ul className="space-y-1">
                     {logs.map((log) => (
                       <li key={log.id} className="text-slate-300">
-                        <span className="text-slate-500">[{log.timestamp}]</span> {log.message}
+                        <span className="text-slate-500">[{log.timestamp}]</span>{" "}
+                        {log.message}
                       </li>
                     ))}
                   </ul>

@@ -150,42 +150,82 @@ async def list_regions():
 
 @app.post("/infer")
 async def infer_endpoint(req: InferRequest):
-    region = choose_best_region()
-    if region is None:
+    # Use ALL healthy regions in parallel
+    regions = [
+        r for r in registry.list_regions()
+        if r.status == "healthy" and not getattr(r, "disabled", False)
+    ]
+    if not regions:
         return JSONResponse(
             status_code=200,
             content={"error": "no healthy regions"},
         )
 
-    start = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"http://{region.ip}/infer",
-                json={"prompt": req.prompt},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPError:
-        registry.update_region(region.id, status="down", latency_ms=None)
-        return JSONResponse(
-            status_code=200,
-            content={"error": "region unavailable"},
-        )
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        async def call_region(region: Region):
+            start = time.perf_counter()
+            try:
+                resp = await client.post(
+                    f"http://{region.ip}/infer",
+                    json={"prompt": req.prompt},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                latency_ms = (time.perf_counter() - start) * 1000.0
 
-    latency_ms = (time.perf_counter() - start) * 1000.0
-    registry.update_region(region.id, status="healthy", latency_ms=latency_ms)
+                registry.update_region(
+                    region.id,
+                    status="healthy",
+                    latency_ms=latency_ms,
+                    last_checked_at=datetime.utcnow(),
+                )
 
-    # Include region name for dashboard
+                return {
+                    "region_id": region.id,
+                    "region_slug": region.slug,
+                    "region_name": region.display_name,
+                    "latency_ms": latency_ms,
+                    "image_url": data.get("image_url"),
+                    "engine": data.get("engine"),
+                    "effect": data.get("effect"),
+                    "error": None,
+                }
+            except Exception as e:
+                registry.update_region(
+                    region.id,
+                    status="down",
+                    latency_ms=None,
+                    last_checked_at=datetime.utcnow(),
+                )
+                return {
+                    "region_id": region.id,
+                    "region_slug": region.slug,
+                    "region_name": region.display_name,
+                    "latency_ms": None,
+                    "image_url": None,
+                    "engine": None,
+                    "effect": None,
+                    "error": str(e),
+                }
+
+        results = await asyncio.gather(*(call_region(r) for r in regions))
+
+    # Pick best region among successful ones
+    successful = [
+        r for r in results
+        if r["image_url"] is not None and r["latency_ms"] is not None and r["error"] is None
+    ]
+    best = min(successful, key=lambda r: r["latency_ms"]) if successful else None
+
     return {
         "prompt": req.prompt,
-        "image_url": data.get("image_url"),
-        "region_id": region.id,
-        "region_slug": region.slug,
-        "region_name": region.display_name,
-        "latency_ms": latency_ms,
+        "image_url": best["image_url"] if best else None,
+        "region_id": best["region_id"] if best else None,
+        "region_slug": best["region_slug"] if best else None,
+        "region_name": best["region_name"] if best else None,
+        "latency_ms": best["latency_ms"] if best else None,
+        "results": results,
     }
-
 
 @app.post("/kill/{region_id}")
 async def kill_region(region_id: str):
